@@ -139,6 +139,9 @@ async function buildExtension() {
         const workDir = buildPath !== "." ? `/workspace/${buildPath}` : "/workspace";
         const flagsStr = configureFlags.length > 0 ? configureFlags.join(' ') : '';
         const configureCmd = flagsStr ? `./configure ${flagsStr}` : './configure';
+        const apkPackages = core.getInput("apk-packages");
+        const basePackages = "autoconf g++ make linux-headers";
+        const allPackages = apkPackages ? `${basePackages} ${apkPackages}` : basePackages;
 
         await exec.exec("docker", [
             "run", "--rm",
@@ -146,7 +149,7 @@ async function buildExtension() {
             "-w", workDir,
             dockerImage,
             "sh", "-c",
-            `apk add --no-cache autoconf g++ make linux-headers && phpize && ${configureCmd} && make`,
+            `apk add --no-cache ${allPackages} && phpize && ${configureCmd} && make`,
         ]);
     } else {
         const opts = buildPath !== "." ? { cwd: buildPath } : {};
