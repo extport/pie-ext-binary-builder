@@ -4,6 +4,61 @@ const github = require("@actions/github");
 const fs = require("fs");
 const path = require("path");
 
+/**
+ * Get the docker-image input. When set, build and PHP detection
+ * run inside this container via `docker run`.
+ */
+function getDockerImage() {
+    return core.getInput("docker-image") || "";
+}
+
+/**
+ * Run a command either directly on the host or inside a Docker container.
+ * Used for commands that need to run in the build environment (PHP, phpize, etc.)
+ */
+async function execInDocker(command, args = [], opts = {}) {
+    const dockerImage = getDockerImage();
+    if (dockerImage) {
+        const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+        const cwd = opts.cwd ? path.resolve(opts.cwd) : workspace;
+        const workDir = cwd.startsWith(workspace)
+            ? `/workspace${cwd.substring(workspace.length)}`
+            : "/workspace";
+
+        return exec.getExecOutput("docker", [
+            "run", "--rm",
+            "-v", `${workspace}:/workspace`,
+            "-w", workDir,
+            dockerImage,
+            command, ...args,
+        ], { ignoreReturnCode: opts.ignoreReturnCode });
+    }
+    return exec.getExecOutput(command, args, opts);
+}
+
+/**
+ * Run a command via exec.exec (no output capture) either on host or in Docker.
+ */
+async function execRunInDocker(command, args = [], opts = {}) {
+    const dockerImage = getDockerImage();
+    if (dockerImage) {
+        const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+        const cwd = opts.cwd ? path.resolve(opts.cwd) : workspace;
+        const workDir = cwd.startsWith(workspace)
+            ? `/workspace${cwd.substring(workspace.length)}`
+            : "/workspace";
+
+        return exec.exec("docker", [
+            "run", "--rm",
+            "-v", `${workspace}:/workspace`,
+            "-w", workDir,
+            dockerImage,
+            command, ...args,
+        ]);
+    }
+    return exec.exec(command, args, opts);
+}
+
 async function determineExtensionNameFromComposerJson() {
     core.info("Detecting extension name from composer.json...");
 
@@ -77,16 +132,33 @@ async function buildExtension() {
     core.info("Building the extension...");
     const configureFlags = parseArgs(core.getInput("configure-flags"));
     const buildPath = core.getInput("build-path") || ".";
-    const opts = buildPath !== "." ? { cwd: buildPath } : {};
+    const dockerImage = getDockerImage();
 
-    await exec.exec("phpize", [], opts);
-    await exec.exec("./configure", configureFlags, opts);
-    await exec.exec("make", [], opts);
+    if (dockerImage) {
+        const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+        const workDir = buildPath !== "." ? `/workspace/${buildPath}` : "/workspace";
+        const flagsStr = configureFlags.length > 0 ? configureFlags.join(' ') : '';
+        const configureCmd = flagsStr ? `./configure ${flagsStr}` : './configure';
+
+        await exec.exec("docker", [
+            "run", "--rm",
+            "-v", `${workspace}:/workspace`,
+            "-w", workDir,
+            dockerImage,
+            "sh", "-c",
+            `apk add --no-cache autoconf g++ make linux-headers && phpize && ${configureCmd} && make`,
+        ]);
+    } else {
+        const opts = buildPath !== "." ? { cwd: buildPath } : {};
+        await exec.exec("phpize", [], opts);
+        await exec.exec("./configure", configureFlags, opts);
+        await exec.exec("make", [], opts);
+    }
 }
 
 async function determinePhpVersionFromPhpConfig() {
     core.info("Detecting php version...");
-    return (await exec.getExecOutput("php-config", ["--version"]))
+    return (await execInDocker("php-config", ["--version"]))
             .stdout
             .trim()
             .split('.')
@@ -128,7 +200,19 @@ async function determineLibcFlavour() {
         return "bsdlibc";
     }
 
-    const lddOutput = (await exec.getExecOutput("ldd", ["--version"], { ignoreReturnCode: true })).stdout;
+    // When using a Docker image, detect libc inside the container
+    const dockerImage = getDockerImage();
+    if (dockerImage) {
+        const lddResult = await execInDocker("ldd", ["--version"], { ignoreReturnCode: true });
+        const lddOutput = lddResult.stdout + lddResult.stderr;
+        if (lddOutput.includes("musl")) {
+            return "musl";
+        }
+        return "glibc";
+    }
+
+    const lddResult = await exec.getExecOutput("ldd", ["--version"], { ignoreReturnCode: true });
+    const lddOutput = lddResult.stdout + lddResult.stderr;
     if (lddOutput.includes("musl")) {
         return "musl";
     }
@@ -138,7 +222,7 @@ async function determineLibcFlavour() {
 
 async function determinePhpBinary() {
     core.info("Locating PHP binary...");
-    const phpBinary = (await exec.getExecOutput("php-config", ["--php-binary"]))
+    const phpBinary = (await execInDocker("php-config", ["--php-binary"]))
         .stdout
         .trim();
 
@@ -152,7 +236,7 @@ async function determinePhpBinary() {
 
 async function determinePhpDebugMode(phpBinary) {
     core.info("Detecting Zend debug mode...");
-    return (await exec.getExecOutput(
+    return (await execInDocker(
             phpBinary,
             ["-n", "-r", "echo PHP_DEBUG ? '-debug' : '';"],
         ))
@@ -162,7 +246,7 @@ async function determinePhpDebugMode(phpBinary) {
 
 async function determineZendThreadSafeMode(phpBinary) {
     core.info("Detecting Zend thread safety mode...");
-    return (await exec.getExecOutput(
+    return (await execInDocker(
             phpBinary,
             ["-n", "-r", "echo ZEND_THREAD_SAFE ? '-zts' : '';"],
         ))
