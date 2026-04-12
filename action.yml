@@ -15,6 +15,10 @@ inputs:
   github-token:
     description: 'The GitHub token to use for uploading assets'
     required: true
+  docker-image:
+    description: 'Docker image to run the build inside (e.g. php:8.2-cli-alpine). When set, build and PHP detection run inside this container via docker run.'
+    required: false
+    default: ''
 outputs:
   package-path:
     description: 'Path to the generated .zip package'

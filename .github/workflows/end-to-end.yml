@@ -103,8 +103,6 @@ jobs:
 
   test-action-alpine:
     runs-on: ${{ matrix.arch == 'x86_64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
-    container: >-
-      ${{ format('php:{0}-{1}-alpine', matrix.php-versions, matrix.zts-mode == 'ts' && 'zts' || 'cli') }}
     needs: [create-test-release]
     strategy:
       fail-fast: false
@@ -123,9 +121,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Install Alpine build dependencies
-        run: apk add --no-cache autoconf g++ make linux-headers jq zip nodejs npm git
-
       - name: Checkout
         uses: actions/checkout@v6
 
@@ -142,6 +137,12 @@ jobs:
           mv ext/php_example_pie_extension.h .
           mv ext/zend_example_pie_extension.c .
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
       - name: Install dependencies
         run: npm ci
 
@@ -155,6 +156,7 @@ jobs:
           configure-flags: '--with-hello-name=FROM_MY_ACTION --enable-example-pie-extension'
           release-tag: ${{ env.RELEASE_TAG }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          docker-image: ${{ format('php:{0}-{1}-alpine', matrix.php-versions, matrix.zts-mode == 'ts' && 'zts' || 'cli') }}
 
       - name: Check Output
         run: |
