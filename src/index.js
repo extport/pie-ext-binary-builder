@@ -128,7 +128,8 @@ async function determineLibcFlavour() {
         return "bsdlibc";
     }
 
-    const lddOutput = (await exec.getExecOutput("ldd", ["--version"], { ignoreReturnCode: true })).stdout;
+    const lddResult = await exec.getExecOutput("ldd", ["--version"], { ignoreReturnCode: true });
+    const lddOutput = lddResult.stdout + lddResult.stderr;
     if (lddOutput.includes("musl")) {
         return "musl";
     }
