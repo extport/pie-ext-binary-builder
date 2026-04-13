@@ -377,7 +377,7 @@ describe('buildExtension', () => {
 
         expect(exec.exec).toHaveBeenCalledWith('phpize', [], {});
         expect(exec.exec).toHaveBeenCalledWith('./configure', ['--enable-test', '--with-foo=/foo/bar'], {});
-        expect(exec.exec).toHaveBeenCalledWith('make', [], {});
+        expect(exec.exec).toHaveBeenCalledWith('make', [expect.stringMatching(/^-j\d+$/)], {});
     });
 
     test('builds the extension with custom build path', async () => {
@@ -391,7 +391,7 @@ describe('buildExtension', () => {
 
         expect(exec.exec).toHaveBeenCalledWith('phpize', [], { cwd: 'some/ext/path' });
         expect(exec.exec).toHaveBeenCalledWith('./configure', ['--enable-test'], { cwd: 'some/ext/path' });
-        expect(exec.exec).toHaveBeenCalledWith('make', [], { cwd: 'some/ext/path' });
+        expect(exec.exec).toHaveBeenCalledWith('make', [expect.stringMatching(/^-j\d+$/)], { cwd: 'some/ext/path' });
     });
 
     test('builds with quoted configure flags', async () => {
