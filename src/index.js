@@ -3,6 +3,7 @@ const exec = require("@actions/exec");
 const github = require("@actions/github");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 
 /**
  * Get the docker-image input. When set, build and PHP detection
@@ -149,13 +150,13 @@ async function buildExtension() {
             "-w", workDir,
             dockerImage,
             "sh", "-c",
-            `apk add --no-cache ${allPackages} && phpize && ${configureCmd} && make`,
+            `apk add --no-cache ${allPackages} && phpize && ${configureCmd} && make -j$(nproc)`,
         ]);
     } else {
         const opts = buildPath !== "." ? { cwd: buildPath } : {};
         await exec.exec("phpize", [], opts);
         await exec.exec("./configure", configureFlags, opts);
-        await exec.exec("make", [], opts);
+        await exec.exec("make", [`-j${os.cpus().length}`], opts);
     }
 }
 
