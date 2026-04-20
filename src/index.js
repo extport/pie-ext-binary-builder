@@ -312,19 +312,36 @@ async function extensionDetails() {
 
     return {
         releaseTag: releaseTag,
+        extName: extName,
         extSoFile: `${extName}.so`,
         extPackageName: `php_${extName}-${releaseTag}_php${phpMajorMinor}-${arch}-${os}-${libcFlavour}${zendDebug}${ztsMode}.zip`
     };
 }
 
+async function smokeTest(extName, soPath) {
+    core.info("Smoke testing extension...");
+    const phpBinary = await module.exports.determinePhpBinary();
+    const result = await execInDocker(phpBinary, [
+        "-d", `extension=${soPath}`,
+        "-r", `echo extension_loaded('${extName}') ? 'OK' : 'FAIL';`,
+    ]);
+    if (!result.stdout.includes("OK")) {
+        throw new Error(`Smoke test failed: extension '${extName}' did not load`);
+    }
+    core.info("Smoke test passed!");
+}
+
 async function main() {
-    const { releaseTag, extSoFile, extPackageName } = await module.exports.extensionDetails();
+    const { releaseTag, extName, extSoFile, extPackageName } = await module.exports.extensionDetails();
 
     await module.exports.buildExtension();
 
     const buildPath = core.getInput("build-path") || ".";
     const modulesDir = path.join(buildPath, "modules");
     await exec.exec("ls", ["-l", modulesDir]);
+
+    const soPath = path.resolve(modulesDir, extSoFile);
+    await module.exports.smokeTest(extName, soPath);
 
     await exec.exec("zip", ["-j", extPackageName, path.join(modulesDir, extSoFile)]);
 
@@ -345,6 +362,7 @@ module.exports = {
     determinePhpDebugMode,
     determineZendThreadSafeMode,
     uploadReleaseAsset,
+    smokeTest,
     extensionDetails,
     main,
 };

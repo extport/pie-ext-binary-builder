@@ -552,6 +552,7 @@ describe('extensionDetails', () => {
         expect(await action.extensionDetails())
             .toEqual({
                 releaseTag: '1.2.3',
+                extName: 'foo',
                 extSoFile: 'foo.so',
                 extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc.zip',
             });
@@ -572,6 +573,7 @@ describe('extensionDetails', () => {
         expect(await action.extensionDetails())
             .toEqual({
                 releaseTag: '1.2.3',
+                extName: 'foo',
                 extSoFile: 'foo.so',
                 extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
             });
@@ -582,10 +584,12 @@ describe('main', () => {
     test('main builds and uploads extension with default build path', async () => {
         jest.spyOn(action, 'extensionDetails').mockResolvedValue({
             releaseTag: '1.2.3',
+            extName: 'foo',
             extSoFile: 'foo.so',
             extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
         });
         jest.spyOn(action, 'buildExtension').mockResolvedValue();
+        jest.spyOn(action, 'smokeTest').mockResolvedValue();
         jest.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
         jest.spyOn(exec, 'exec').mockResolvedValue();
         core.getInput.mockImplementation((name) => {
@@ -605,10 +609,12 @@ describe('main', () => {
     test('main builds and uploads extension with custom build path', async () => {
         jest.spyOn(action, 'extensionDetails').mockResolvedValue({
             releaseTag: '1.2.3',
+            extName: 'foo',
             extSoFile: 'foo.so',
             extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
         });
         jest.spyOn(action, 'buildExtension').mockResolvedValue();
+        jest.spyOn(action, 'smokeTest').mockResolvedValue();
         jest.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
         jest.spyOn(exec, 'exec').mockResolvedValue();
         core.getInput.mockImplementation((name) => {
