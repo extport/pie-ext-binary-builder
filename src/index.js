@@ -37,28 +37,6 @@ async function execInDocker(command, args = [], opts = {}) {
     return exec.getExecOutput(command, args, opts);
 }
 
-/**
- * Run a command via exec.exec (no output capture) either on host or in Docker.
- */
-async function execRunInDocker(command, args = [], opts = {}) {
-    const dockerImage = getDockerImage();
-    if (dockerImage) {
-        const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
-        const cwd = opts.cwd ? path.resolve(opts.cwd) : workspace;
-        const workDir = cwd.startsWith(workspace)
-            ? `/workspace${cwd.substring(workspace.length)}`
-            : "/workspace";
-
-        return exec.exec("docker", [
-            "run", "--rm",
-            "-v", `${workspace}:/workspace`,
-            "-w", workDir,
-            dockerImage,
-            command, ...args,
-        ]);
-    }
-    return exec.exec(command, args, opts);
-}
 
 async function determineExtensionNameFromComposerJson() {
     core.info("Detecting extension name from composer.json...");
@@ -321,12 +299,25 @@ async function extensionDetails() {
 async function smokeTest(extName, soPath) {
     core.info("Smoke testing extension...");
     const phpBinary = await module.exports.determinePhpBinary();
-    const result = await execInDocker(phpBinary, [
-        "-d", `extension=${soPath}`,
-        "-r", `echo extension_loaded('${extName}') ? 'OK' : 'FAIL';`,
-    ]);
-    if (!result.stdout.includes("OK")) {
-        throw new Error(`Smoke test failed: extension '${extName}' did not load`);
+    const dockerImage = getDockerImage();
+
+    if (dockerImage) {
+        // Docker: fresh container may need runtime deps (libstdc++/libgcc for C++ extensions)
+        const result = await execInDocker("sh", [
+            "-c",
+            `if command -v apk >/dev/null 2>&1; then apk add --no-cache libstdc++ libgcc; fi && ${phpBinary} -d extension=${soPath} -r "echo extension_loaded('${extName}') ? 'OK' : 'FAIL';"`,
+        ]);
+        if (!result.stdout.includes("OK")) {
+            throw new Error(`Smoke test failed: extension '${extName}' did not load`);
+        }
+    } else {
+        const result = await execInDocker(phpBinary, [
+            "-d", `extension=${soPath}`,
+            "-r", `echo extension_loaded('${extName}') ? 'OK' : 'FAIL';`,
+        ]);
+        if (!result.stdout.includes("OK")) {
+            throw new Error(`Smoke test failed: extension '${extName}' did not load`);
+        }
     }
     core.info("Smoke test passed!");
 }
@@ -340,7 +331,7 @@ async function main() {
     const modulesDir = path.join(buildPath, "modules");
     await exec.exec("ls", ["-l", modulesDir]);
 
-    const soPath = path.resolve(modulesDir, extSoFile);
+    const soPath = path.join(modulesDir, extSoFile);
     await module.exports.smokeTest(extName, soPath);
 
     await exec.exec("zip", ["-j", extPackageName, path.join(modulesDir, extSoFile)]);
