@@ -339,6 +339,32 @@ describe('determineZendThreadSafeMode', () => {
     });
 });
 
+describe('parseArgs', () => {
+    test('splits simple flags', () => {
+        expect(action.parseArgs('--enable-test --with-foo=/foo/bar'))
+            .toEqual(['--enable-test', '--with-foo=/foo/bar']);
+    });
+
+    test('respects double-quoted strings', () => {
+        expect(action.parseArgs('CFLAGS="-O2 -g" --enable-igbinary'))
+            .toEqual(['CFLAGS=-O2 -g', '--enable-igbinary']);
+    });
+
+    test('respects single-quoted strings', () => {
+        expect(action.parseArgs("CFLAGS='-O2 -g' --enable-igbinary"))
+            .toEqual(['CFLAGS=-O2 -g', '--enable-igbinary']);
+    });
+
+    test('returns empty array for empty string', () => {
+        expect(action.parseArgs('')).toEqual([]);
+    });
+
+    test('handles extra whitespace', () => {
+        expect(action.parseArgs('  --flag1   --flag2  '))
+            .toEqual(['--flag1', '--flag2']);
+    });
+});
+
 describe('buildExtension', () => {
     test('builds the extension with configure params and default build path', async () => {
         core.getInput.mockImplementation((name) => {
@@ -351,7 +377,7 @@ describe('buildExtension', () => {
 
         expect(exec.exec).toHaveBeenCalledWith('phpize', [], {});
         expect(exec.exec).toHaveBeenCalledWith('./configure', ['--enable-test', '--with-foo=/foo/bar'], {});
-        expect(exec.exec).toHaveBeenCalledWith('make', [], {});
+        expect(exec.exec).toHaveBeenCalledWith('make', [expect.stringMatching(/^-j\d+$/)], {});
     });
 
     test('builds the extension with custom build path', async () => {
@@ -365,7 +391,31 @@ describe('buildExtension', () => {
 
         expect(exec.exec).toHaveBeenCalledWith('phpize', [], { cwd: 'some/ext/path' });
         expect(exec.exec).toHaveBeenCalledWith('./configure', ['--enable-test'], { cwd: 'some/ext/path' });
-        expect(exec.exec).toHaveBeenCalledWith('make', [], { cwd: 'some/ext/path' });
+        expect(exec.exec).toHaveBeenCalledWith('make', [expect.stringMatching(/^-j\d+$/)], { cwd: 'some/ext/path' });
+    });
+
+    test('builds with quoted configure flags', async () => {
+        core.getInput.mockImplementation((name) => {
+            if (name === 'configure-flags') return 'CFLAGS="-O2 -g" --enable-igbinary';
+            if (name === 'build-path') return '.';
+            return '';
+        });
+
+        await action.buildExtension();
+
+        expect(exec.exec).toHaveBeenCalledWith('./configure', ['CFLAGS=-O2 -g', '--enable-igbinary'], {});
+    });
+
+    test('builds with empty configure flags', async () => {
+        core.getInput.mockImplementation((name) => {
+            if (name === 'configure-flags') return '';
+            if (name === 'build-path') return '.';
+            return '';
+        });
+
+        await action.buildExtension();
+
+        expect(exec.exec).toHaveBeenCalledWith('./configure', [], {});
     });
 });
 
@@ -378,6 +428,7 @@ describe('uploadReleaseAsset', () => {
                 repos: {
                     listReleases: jest.fn(),
                     uploadReleaseAsset: jest.fn(),
+                    deleteReleaseAsset: jest.fn(),
                 },
             },
         };
@@ -392,6 +443,7 @@ describe('uploadReleaseAsset', () => {
                     id: 123,
                     tag_name: '1.0.0',
                     name: 'Release 1.0.0',
+                    assets: [],
                 },
             ],
         });
@@ -411,6 +463,52 @@ describe('uploadReleaseAsset', () => {
             name: 'release-asset.zip',
             data: 'release-asset-fake-data',
         });
+    });
+
+    test('deletes existing asset before uploading', async () => {
+        octokit.rest.repos.listReleases.mockResolvedValue({
+            data: [
+                {
+                    id: 123,
+                    tag_name: '1.0.0',
+                    name: 'Release 1.0.0',
+                    assets: [
+                        { id: 456, name: 'release-asset.zip' },
+                    ],
+                },
+            ],
+        });
+        fs.readFileSync.mockReturnValue('release-asset-fake-data');
+
+        await action.uploadReleaseAsset('1.0.0', 'release-asset.zip');
+
+        expect(octokit.rest.repos.deleteReleaseAsset).toHaveBeenCalledWith({
+            owner: 'the-owner',
+            repo: 'the-repo',
+            asset_id: 456,
+        });
+        expect(octokit.rest.repos.uploadReleaseAsset).toHaveBeenCalled();
+    });
+
+    test('does not delete when no matching asset exists', async () => {
+        octokit.rest.repos.listReleases.mockResolvedValue({
+            data: [
+                {
+                    id: 123,
+                    tag_name: '1.0.0',
+                    name: 'Release 1.0.0',
+                    assets: [
+                        { id: 789, name: 'other-asset.zip' },
+                    ],
+                },
+            ],
+        });
+        fs.readFileSync.mockReturnValue('release-asset-fake-data');
+
+        await action.uploadReleaseAsset('1.0.0', 'release-asset.zip');
+
+        expect(octokit.rest.repos.deleteReleaseAsset).not.toHaveBeenCalled();
+        expect(octokit.rest.repos.uploadReleaseAsset).toHaveBeenCalled();
     });
 
     test('throws error when there are no releases', async () => {
@@ -454,6 +552,7 @@ describe('extensionDetails', () => {
         expect(await action.extensionDetails())
             .toEqual({
                 releaseTag: '1.2.3',
+                extName: 'foo',
                 extSoFile: 'foo.so',
                 extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc.zip',
             });
@@ -474,6 +573,7 @@ describe('extensionDetails', () => {
         expect(await action.extensionDetails())
             .toEqual({
                 releaseTag: '1.2.3',
+                extName: 'foo',
                 extSoFile: 'foo.so',
                 extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
             });
@@ -484,10 +584,12 @@ describe('main', () => {
     test('main builds and uploads extension with default build path', async () => {
         jest.spyOn(action, 'extensionDetails').mockResolvedValue({
             releaseTag: '1.2.3',
+            extName: 'foo',
             extSoFile: 'foo.so',
             extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
         });
         jest.spyOn(action, 'buildExtension').mockResolvedValue();
+        jest.spyOn(action, 'smokeTest').mockResolvedValue();
         jest.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
         jest.spyOn(exec, 'exec').mockResolvedValue();
         core.getInput.mockImplementation((name) => {
@@ -507,10 +609,12 @@ describe('main', () => {
     test('main builds and uploads extension with custom build path', async () => {
         jest.spyOn(action, 'extensionDetails').mockResolvedValue({
             releaseTag: '1.2.3',
+            extName: 'foo',
             extSoFile: 'foo.so',
             extPackageName: 'php_foo-1.2.3_php8.1-x86_64-linux-glibc-debug-zts.zip',
         });
         jest.spyOn(action, 'buildExtension').mockResolvedValue();
+        jest.spyOn(action, 'smokeTest').mockResolvedValue();
         jest.spyOn(action, 'uploadReleaseAsset').mockResolvedValue();
         jest.spyOn(exec, 'exec').mockResolvedValue();
         core.getInput.mockImplementation((name) => {
