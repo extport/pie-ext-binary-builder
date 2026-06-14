@@ -15,9 +15,17 @@ inputs:
   github-token:
     description: 'The GitHub token to use for uploading assets'
     required: true
+  docker-image:
+    description: 'Docker image to run the build inside (e.g. php:8.2-cli-alpine). When set, build and PHP detection run inside this container via docker run.'
+    required: false
+    default: ''
+  apk-packages:
+    description: 'Additional Alpine packages to install when building with a Docker image (space-separated)'
+    required: false
+    default: ''
 outputs:
   package-path:
     description: 'Path to the generated .zip package'
 runs:
-  using: 'node20'
+  using: 'node24'
   main: dist/index.js

@@ -3,6 +3,40 @@ const exec = require("@actions/exec");
 const github = require("@actions/github");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+
+/**
+ * Get the docker-image input. When set, build and PHP detection
+ * run inside this container via `docker run`.
+ */
+function getDockerImage() {
+    return core.getInput("docker-image") || "";
+}
+
+/**
+ * Run a command either directly on the host or inside a Docker container.
+ * Used for commands that need to run in the build environment (PHP, phpize, etc.)
+ */
+async function execInDocker(command, args = [], opts = {}) {
+    const dockerImage = getDockerImage();
+    if (dockerImage) {
+        const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+        const cwd = opts.cwd ? path.resolve(opts.cwd) : workspace;
+        const workDir = cwd.startsWith(workspace)
+            ? `/workspace${cwd.substring(workspace.length)}`
+            : "/workspace";
+
+        return exec.getExecOutput("docker", [
+            "run", "--rm",
+            "-v", `${workspace}:/workspace`,
+            "-w", workDir,
+            dockerImage,
+            command, ...args,
+        ], { ignoreReturnCode: opts.ignoreReturnCode });
+    }
+    return exec.getExecOutput(command, args, opts);
+}
+
 
 async function determineExtensionNameFromComposerJson() {
     core.info("Detecting extension name from composer.json...");
@@ -50,20 +84,63 @@ async function determineExtensionNameFromComposerJson() {
     return extName;
 }
 
+function parseArgs(str) {
+    const args = [];
+    let current = '';
+    let inDouble = false;
+    let inSingle = false;
+
+    for (const ch of str) {
+        if (ch === '"' && !inSingle) {
+            inDouble = !inDouble;
+        } else if (ch === "'" && !inDouble) {
+            inSingle = !inSingle;
+        } else if (ch === ' ' && !inDouble && !inSingle) {
+            if (current) args.push(current);
+            current = '';
+        } else {
+            current += ch;
+        }
+    }
+    if (current) args.push(current);
+
+    return args;
+}
+
 async function buildExtension() {
     core.info("Building the extension...");
-    const configureFlags = core.getInput("configure-flags").split(' ');
+    const configureFlags = parseArgs(core.getInput("configure-flags"));
     const buildPath = core.getInput("build-path") || ".";
-    const opts = buildPath !== "." ? { cwd: buildPath } : {};
+    const dockerImage = getDockerImage();
 
-    await exec.exec("phpize", [], opts);
-    await exec.exec("./configure", configureFlags, opts);
-    await exec.exec("make", [], opts);
+    if (dockerImage) {
+        const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+        const workDir = buildPath !== "." ? `/workspace/${buildPath}` : "/workspace";
+        const flagsStr = configureFlags.length > 0 ? configureFlags.join(' ') : '';
+        const configureCmd = flagsStr ? `./configure ${flagsStr}` : './configure';
+        const apkPackages = core.getInput("apk-packages");
+        const basePackages = "autoconf g++ make linux-headers";
+        const allPackages = apkPackages ? `${basePackages} ${apkPackages}` : basePackages;
+
+        await exec.exec("docker", [
+            "run", "--rm",
+            "-v", `${workspace}:/workspace`,
+            "-w", workDir,
+            dockerImage,
+            "sh", "-c",
+            `apk add --no-cache ${allPackages} && phpize && ${configureCmd} && make -j$(nproc)`,
+        ]);
+    } else {
+        const opts = buildPath !== "." ? { cwd: buildPath } : {};
+        await exec.exec("phpize", [], opts);
+        await exec.exec("./configure", configureFlags, opts);
+        await exec.exec("make", [`-j${os.cpus().length}`], opts);
+    }
 }
 
 async function determinePhpVersionFromPhpConfig() {
     core.info("Detecting php version...");
-    return (await exec.getExecOutput("php-config", ["--version"]))
+    return (await execInDocker("php-config", ["--version"]))
             .stdout
             .trim()
             .split('.')
@@ -105,7 +182,19 @@ async function determineLibcFlavour() {
         return "bsdlibc";
     }
 
-    const lddOutput = (await exec.getExecOutput("ldd", ["--version"], { ignoreReturnCode: true })).stdout;
+    // When using a Docker image, detect libc inside the container
+    const dockerImage = getDockerImage();
+    if (dockerImage) {
+        const lddResult = await execInDocker("ldd", ["--version"], { ignoreReturnCode: true });
+        const lddOutput = lddResult.stdout + lddResult.stderr;
+        if (lddOutput.includes("musl")) {
+            return "musl";
+        }
+        return "glibc";
+    }
+
+    const lddResult = await exec.getExecOutput("ldd", ["--version"], { ignoreReturnCode: true });
+    const lddOutput = lddResult.stdout + lddResult.stderr;
     if (lddOutput.includes("musl")) {
         return "musl";
     }
@@ -115,7 +204,7 @@ async function determineLibcFlavour() {
 
 async function determinePhpBinary() {
     core.info("Locating PHP binary...");
-    const phpBinary = (await exec.getExecOutput("php-config", ["--php-binary"]))
+    const phpBinary = (await execInDocker("php-config", ["--php-binary"]))
         .stdout
         .trim();
 
@@ -129,7 +218,7 @@ async function determinePhpBinary() {
 
 async function determinePhpDebugMode(phpBinary) {
     core.info("Detecting Zend debug mode...");
-    return (await exec.getExecOutput(
+    return (await execInDocker(
             phpBinary,
             ["-n", "-r", "echo PHP_DEBUG ? '-debug' : '';"],
         ))
@@ -139,7 +228,7 @@ async function determinePhpDebugMode(phpBinary) {
 
 async function determineZendThreadSafeMode(phpBinary) {
     core.info("Detecting Zend thread safety mode...");
-    return (await exec.getExecOutput(
+    return (await execInDocker(
             phpBinary,
             ["-n", "-r", "echo ZEND_THREAD_SAFE ? '-zts' : '';"],
         ))
@@ -166,6 +255,17 @@ async function uploadReleaseAsset(releaseTag, packageFilename) {
     }
 
     core.info(`Found release ${release.name || release.tag_name} (ID: ${release.id})`);
+
+    const existingAsset = (release.assets || []).find(a => a.name === packageFilename);
+    if (existingAsset) {
+        core.info("Asset already exists, replacing...");
+        await octokit.rest.repos.deleteReleaseAsset({
+            owner,
+            repo,
+            asset_id: existingAsset.id,
+        });
+    }
+
     await octokit.rest.repos.uploadReleaseAsset({
         owner,
         repo,
@@ -190,19 +290,49 @@ async function extensionDetails() {
 
     return {
         releaseTag: releaseTag,
+        extName: extName,
         extSoFile: `${extName}.so`,
         extPackageName: `php_${extName}-${releaseTag}_php${phpMajorMinor}-${arch}-${os}-${libcFlavour}${zendDebug}${ztsMode}.zip`
     };
 }
 
+async function smokeTest(extName, soPath) {
+    core.info("Smoke testing extension...");
+    const phpBinary = await module.exports.determinePhpBinary();
+    const dockerImage = getDockerImage();
+
+    if (dockerImage) {
+        // Docker: fresh container may need runtime deps (libstdc++/libgcc for C++ extensions)
+        const result = await execInDocker("sh", [
+            "-c",
+            `if command -v apk >/dev/null 2>&1; then apk add --no-cache libstdc++ libgcc; fi && ${phpBinary} -d extension=${soPath} -r "echo extension_loaded('${extName}') ? 'OK' : 'FAIL';"`,
+        ]);
+        if (!result.stdout.includes("OK")) {
+            throw new Error(`Smoke test failed: extension '${extName}' did not load`);
+        }
+    } else {
+        const result = await execInDocker(phpBinary, [
+            "-d", `extension=${soPath}`,
+            "-r", `echo extension_loaded('${extName}') ? 'OK' : 'FAIL';`,
+        ]);
+        if (!result.stdout.includes("OK")) {
+            throw new Error(`Smoke test failed: extension '${extName}' did not load`);
+        }
+    }
+    core.info("Smoke test passed!");
+}
+
 async function main() {
-    const { releaseTag, extSoFile, extPackageName } = await module.exports.extensionDetails();
+    const { releaseTag, extName, extSoFile, extPackageName } = await module.exports.extensionDetails();
 
     await module.exports.buildExtension();
 
     const buildPath = core.getInput("build-path") || ".";
     const modulesDir = path.join(buildPath, "modules");
     await exec.exec("ls", ["-l", modulesDir]);
+
+    const soPath = path.join(modulesDir, extSoFile);
+    await module.exports.smokeTest(extName, soPath);
 
     await exec.exec("zip", ["-j", extPackageName, path.join(modulesDir, extSoFile)]);
 
@@ -212,6 +342,7 @@ async function main() {
 }
 
 module.exports = {
+    parseArgs,
     determineExtensionNameFromComposerJson,
     buildExtension,
     determinePhpVersionFromPhpConfig,
@@ -222,6 +353,7 @@ module.exports = {
     determinePhpDebugMode,
     determineZendThreadSafeMode,
     uploadReleaseAsset,
+    smokeTest,
     extensionDetails,
     main,
 };
